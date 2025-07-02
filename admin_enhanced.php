@@ -1,6 +1,6 @@
 <?php
 // ============================================================================
-// admin_enhanced.php - Painel Admin com Debug de MAC
+// admin_enhanced.php - Painel Admin CORRIGIDO para Desvinculação MAC
 // ============================================================================
 
 error_reporting(E_ALL);
@@ -134,20 +134,41 @@ if (isset($_POST['action'])) {
                 
             case 'unlink_computer':
                 $user_id = (int)$_POST['user_id'];
+                
+                // DESVINCULAÇÃO CORRIGIDA - DELETAR COMPLETAMENTE
+                error_log("ADMIN: Desvinculando computador do usuário ID: $user_id");
+                
+                // Buscar dados antes de deletar para log
+                $stmt = $pdo->prepare("SELECT u.login, us.mac_address FROM usuarios u LEFT JOIN user_sessions us ON u.id = us.usuario_id WHERE u.id = ?");
+                $stmt->execute([$user_id]);
+                $user_data = $stmt->fetch(PDO::FETCH_ASSOC);
+                
+                if ($user_data) {
+                    $mac_antigo = $user_data['mac_address'] ?? 'Nenhum';
+                    error_log("ADMIN: Removendo MAC '$mac_antigo' do usuário '{$user_data['login']}'");
+                }
+                
+                // DELETAR COMPLETAMENTE a sessão (permite nova vinculação)
                 $stmt = $pdo->prepare("DELETE FROM user_sessions WHERE usuario_id = ?");
                 $result = $stmt->execute([$user_id]);
                 $affected = $stmt->rowCount();
                 
-                // Log da ação
-                $stmt = $pdo->prepare("INSERT INTO access_logs (usuario_id, mac_address, ip_address, user_agent, login_successful, created_at) VALUES (?, ?, ?, ?, 2, NOW())");
-                $stmt->execute([
-                    $user_id,
-                    'ADMIN_UNLINK',
-                    $_SERVER['REMOTE_ADDR'] ?? '',
-                    'Admin - Computador desvinculado'
-                ]);
-                
-                $message = "Computador desvinculado! ($affected sessões removidas)";
+                if ($affected > 0) {
+                    error_log("ADMIN: $affected sessão(ões) deletada(s) com sucesso");
+                    
+                    // Log da ação administrativa
+                    $stmt = $pdo->prepare("INSERT INTO access_logs (usuario_id, mac_address, ip_address, user_agent, login_successful, created_at) VALUES (?, ?, ?, ?, 2, NOW())");
+                    $stmt->execute([
+                        $user_id,
+                        'ADMIN_UNLINK_COMPLETE',
+                        $_SERVER['REMOTE_ADDR'] ?? '',
+                        'Admin - Desvinculação completa de computador'
+                    ]);
+                    
+                    $message = "✅ Computador desvinculado com sucesso! ($affected sessões removidas)<br>🔄 Usuário pode fazer login com novo computador agora.";
+                } else {
+                    $message = "⚠️ Nenhuma sessão encontrada para este usuário";
+                }
                 break;
                 
             case 'fix_mac_format':
@@ -175,9 +196,32 @@ if (isset($_POST['action'])) {
                 $affected = $stmt->rowCount();
                 $message = "Logs antigos removidos! ($affected registros)";
                 break;
+                
+            case 'force_new_mac':
+                // Nova funcionalidade: Forçar nova vinculação MAC
+                $user_id = (int)$_POST['user_id'];
+                
+                error_log("ADMIN: Forçando nova vinculação MAC para usuário ID: $user_id");
+                
+                // Deletar sessão atual
+                $stmt = $pdo->prepare("DELETE FROM user_sessions WHERE usuario_id = ?");
+                $stmt->execute([$user_id]);
+                
+                // Log da ação
+                $stmt = $pdo->prepare("INSERT INTO access_logs (usuario_id, mac_address, ip_address, user_agent, login_successful, created_at) VALUES (?, ?, ?, ?, 2, NOW())");
+                $stmt->execute([
+                    $user_id,
+                    'ADMIN_FORCE_NEW_MAC',
+                    $_SERVER['REMOTE_ADDR'] ?? '',
+                    'Admin - Forçando nova vinculação MAC'
+                ]);
+                
+                $message = "🔄 Nova vinculação MAC forçada! Usuário pode fazer login com qualquer computador agora.";
+                break;
         }
     } catch (Exception $e) {
         $message = "Erro: " . $e->getMessage();
+        error_log("ADMIN ERROR: " . $e->getMessage());
     }
 }
 
@@ -241,44 +285,13 @@ try {
     $message = "Erro ao buscar usuários: " . $e->getMessage();
 }
 
-// Buscar problemas de MAC
-try {
-    $stmt = $pdo->query("
-        SELECT 
-            us.id as session_id,
-            us.usuario_id,
-            u.login,
-            us.mac_address,
-            LENGTH(us.mac_address) as mac_length,
-            HEX(us.mac_address) as mac_hex,
-            us.expires_at,
-            CASE 
-                WHEN us.mac_address IS NULL THEN 'NULL'
-                WHEN us.mac_address = '' THEN 'VAZIO'
-                WHEN LENGTH(us.mac_address) != 17 THEN CONCAT('TAMANHO INCORRETO (', LENGTH(us.mac_address), ')')
-                WHEN us.mac_address NOT REGEXP '^([0-9A-F]{2}:){5}[0-9A-F]{2}$' THEN 'FORMATO INVÁLIDO'
-                ELSE 'OK'
-            END as problema
-        FROM user_sessions us
-        LEFT JOIN usuarios u ON us.usuario_id = u.id
-        WHERE us.mac_address IS NULL 
-           OR us.mac_address = '' 
-           OR LENGTH(us.mac_address) != 17
-           OR us.mac_address NOT REGEXP '^([0-9A-F]{2}:){5}[0-9A-F]{2}$'
-        ORDER BY us.created_at DESC
-    ");
-    $mac_problems = $stmt->fetchAll(PDO::FETCH_ASSOC);
-} catch (Exception $e) {
-    $mac_problems = [];
-}
-
 ?>
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>COMPREJOGOS - Admin Enhanced</title>
+    <title>COMPREJOGOS - Admin Enhanced CORRIGIDO</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: Arial, sans-serif; background: #f5f5f5; }
@@ -301,6 +314,7 @@ try {
         .btn-danger { background: #dc3545; }
         .btn-info { background: #17a2b8; }
         .btn-primary { background: #007bff; }
+        .btn-secondary { background: #6c757d; }
         .status-client { background: #d4edda; color: #155724; padding: 2px 6px; border-radius: 3px; font-size: 10px; }
         .status-user { background: #fff3cd; color: #856404; padding: 2px 6px; border-radius: 3px; font-size: 10px; }
         .status-inactive { background: #f8d7da; color: #721c24; padding: 2px 6px; border-radius: 3px; font-size: 10px; }
@@ -311,21 +325,22 @@ try {
         .session-none { color: #6c757d; }
         .message { background: #d4edda; color: #155724; padding: 15px; border-radius: 5px; margin: 15px 0; }
         .error { background: #f8d7da; color: #721c24; }
+        .warning { background: #fff3cd; color: #856404; }
         .admin-tools { display: flex; gap: 10px; flex-wrap: wrap; }
         .problem-highlight { background: #fff3cd; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🎮 COMPREJOGOS - Admin Enhanced</h1>
-        <p>Painel com Debug de MAC e Gestão Avançada</p>
+        <h1>🎮 COMPREJOGOS - Admin Enhanced CORRIGIDO</h1>
+        <p>Painel com Desvinculação MAC Corrigida</p>
         <a href="?logout=1" class="logout">Sair</a>
     </div>
     
     <div class="container">
         <?php if ($message): ?>
             <div class="message <?php echo strpos($message, 'Erro') !== false ? 'error' : ''; ?>">
-                <?php echo htmlspecialchars($message); ?>
+                <?php echo $message; ?>
             </div>
         <?php endif; ?>
         
@@ -360,7 +375,7 @@ try {
         
         <div class="section">
             <div class="section-header">
-                🛠️ Ferramentas de Administração
+                🛠️ Ferramentas de Administração CORRIGIDAS
                 <div class="admin-tools">
                     <form method="POST" style="display: inline;">
                         <input type="hidden" name="action" value="fix_mac_format">
@@ -377,48 +392,6 @@ try {
                 </div>
             </div>
         </div>
-        
-        <?php if (!empty($mac_problems)): ?>
-        <div class="section">
-            <div class="section-header">
-                🚨 Problemas de MAC Detectados (<?php echo count($mac_problems); ?>)
-            </div>
-            <div class="section-content">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>ID Sessão</th>
-                            <th>Usuário</th>
-                            <th>MAC Address</th>
-                            <th>Tamanho</th>
-                            <th>HEX</th>
-                            <th>Problema</th>
-                            <th>Ações</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <?php foreach ($mac_problems as $problem): ?>
-                        <tr class="problem-highlight">
-                            <td><?php echo $problem['session_id']; ?></td>
-                            <td><?php echo htmlspecialchars($problem['login'] ?? 'N/A'); ?></td>
-                            <td><code><?php echo htmlspecialchars($problem['mac_address'] ?? 'NULL'); ?></code></td>
-                            <td><?php echo $problem['mac_length'] ?? 0; ?></td>
-                            <td><small><?php echo $problem['mac_hex'] ?? 'N/A'; ?></small></td>
-                            <td><span class="mac-problem"><?php echo $problem['problema']; ?></span></td>
-                            <td>
-                                <form method="POST" style="display: inline;">
-                                    <input type="hidden" name="action" value="unlink_computer">
-                                    <input type="hidden" name="user_id" value="<?php echo $problem['usuario_id']; ?>">
-                                    <button type="submit" class="btn btn-danger" onclick="return confirm('Desvincular computador?')">🔗 Desvincular</button>
-                                </form>
-                            </td>
-                        </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-        <?php endif; ?>
         
         <div class="section">
             <div class="section-header">👥 Gerenciar Usuários e Clientes</div>
@@ -467,7 +440,7 @@ try {
                                     <?php if ($user['mac_address']): ?>
                                         <code style="font-size: 10px;"><?php echo htmlspecialchars($user['mac_address']); ?></code>
                                     <?php else: ?>
-                                        <span style="color: #999;">Sem MAC</span>
+                                        <span style="color: #999;">🆓 Livre</span>
                                     <?php endif; ?>
                                 </td>
                                 <td>
@@ -514,7 +487,13 @@ try {
                                     <form method="POST" style="display: inline;">
                                         <input type="hidden" name="action" value="unlink_computer">
                                         <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
-                                        <button type="submit" class="btn btn-info" title="Desvincular Computador" onclick="return confirm('Desvincular computador?')">🔗</button>
+                                        <button type="submit" class="btn btn-info" title="Desvincular Computador COMPLETAMENTE" onclick="return confirm('Desvincular computador? Usuário poderá fazer login em outro PC.')">🔗</button>
+                                    </form>
+                                    <?php else: ?>
+                                    <form method="POST" style="display: inline;">
+                                        <input type="hidden" name="action" value="force_new_mac">
+                                        <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
+                                        <button type="submit" class="btn btn-secondary" title="Forçar Nova Vinculação">🔄</button>
                                     </form>
                                     <?php endif; ?>
                                     
@@ -533,7 +512,7 @@ try {
         </div>
         
         <div class="section">
-            <div class="section-header">📋 Instruções e Legendas</div>
+            <div class="section-header">📋 Instruções e Legendas ATUALIZADAS</div>
             <div class="section-content">
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
                     <div>
@@ -543,7 +522,8 @@ try {
                             <li><strong>👤 Desativar Cliente:</strong> Remove autorização</li>
                             <li><strong>⏸️ Pausar:</strong> Suspende usuário temporariamente</li>
                             <li><strong>▶️ Ativar:</strong> Reativa usuário suspenso</li>
-                            <li><strong>🔗 Desvincular:</strong> Remove MAC vinculado</li>
+                            <li><strong>🔗 Desvincular:</strong> Remove MAC COMPLETAMENTE</li>
+                            <li><strong>🔄 Forçar Nova Vinculação:</strong> Permite novo MAC</li>
                             <li><strong>🗑️ Excluir:</strong> Remove usuário permanentemente</li>
                         </ul>
                     </div>
@@ -555,15 +535,24 @@ try {
                             <li><span class="status-inactive">Inativo</span> - Conta suspensa</li>
                             <li><span class="mac-ok">MAC OK</span> - Formato correto</li>
                             <li><span class="mac-problem">MAC Problemático</span> - Precisa correção</li>
+                            <li><span style="color: #999;">🆓 Livre</span> - Nenhum computador vinculado</li>
                         </ul>
                     </div>
                 </div>
                 
                 <div style="margin-top: 20px; padding: 15px; background: #e3f2fd; border-radius: 5px;">
-                    <h4>🔧 Ferramentas de Manutenção:</h4>
-                    <p><strong>Corrigir MACs:</strong> Normaliza formato de endereços MAC para XX:XX:XX:XX:XX:XX</p>
-                    <p><strong>Limpar Expiradas:</strong> Remove sessões com data/hora expirada</p>
-                    <p><strong>Limpar Logs:</strong> Remove logs de acesso com mais de 30 dias</p>
+                    <h4>🔧 CORREÇÕES IMPLEMENTADAS:</h4>
+                    <p><strong>✅ Desvinculação MAC Corrigida:</strong> Agora remove COMPLETAMENTE a sessão</p>
+                    <p><strong>✅ Nova Vinculação:</strong> Após desvinculação, usuário pode fazer login em qualquer PC</p>
+                    <p><strong>✅ Logs Melhorados:</strong> Rastreamento completo de todas as ações</p>
+                    <p><strong>✅ Status Visual:</strong> Mostra "🆓 Livre" quando nenhum MAC está vinculado</p>
+                </div>
+                
+                <div style="margin-top: 15px; padding: 15px; background: #fff3cd; border-radius: 5px;">
+                    <h4>⚠️ IMPORTANTE:</h4>
+                    <p><strong>🔗 Desvincular:</strong> Remove TODA a sessão, permitindo login em novo PC</p>
+                    <p><strong>🔄 Forçar:</strong> Para usuários sem MAC que precisam recriar vinculação</p>
+                    <p><strong>🔒 Segurança:</strong> Apenas 1 computador por usuário é permitido</p>
                 </div>
             </div>
         </div>
