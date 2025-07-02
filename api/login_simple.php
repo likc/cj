@@ -1,6 +1,6 @@
 <?php
 // ============================================================================
-// api/login_simple.php - VERSÃO CORRIGIDA - SALVA MAC CORRETAMENTE
+// api/login_simple.php - VERSÃO FINAL SEM LOGS DE DEBUG
 // ============================================================================
 
 header('Content-Type: application/json; charset=utf-8');
@@ -52,26 +52,20 @@ function normalizarMac($mac_input) {
 
 $mac_address = normalizarMac($mac_address_raw);
 
-error_log("API LOGIN: Usuario=$login, MAC=$mac_address");
-
-// Validações básicas
 if (empty($login) || empty($senha) || !$mac_address) {
     echo json_encode(['success' => false, 'message' => 'Dados inválidos']);
     exit;
 }
 
 try {
-    // Conectar ao banco
     $pdo = new PDO("mysql:host={$db_host};dbname={$db_name};charset=utf8mb4", $db_user, $db_pass);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     
-    // Verificar se coluna is_client existe
     $stmt = $pdo->query("SHOW COLUMNS FROM usuarios LIKE 'is_client'");
     if ($stmt->rowCount() == 0) {
         $pdo->exec("ALTER TABLE usuarios ADD COLUMN is_client TINYINT(1) DEFAULT 0");
     }
     
-    // 1. VALIDAR USUÁRIO
     $stmt = $pdo->prepare("SELECT id, login, senha, ativo, COALESCE(is_client, 0) as is_client FROM usuarios WHERE login = ?");
     $stmt->execute([$login]);
     $usuario = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -95,32 +89,15 @@ try {
         exit;
     }
     
-    error_log("Usuario válido: {$usuario['login']} (ID: {$usuario['id']})");
-    
-    // 2. VERIFICAR MAC NA DATABASE
     $stmt = $pdo->prepare("SELECT mac_address, session_token, expires_at FROM user_sessions WHERE usuario_id = ?");
     $stmt->execute([$usuario['id']]);
     $sessao_existente = $stmt->fetch(PDO::FETCH_ASSOC);
     
     if ($sessao_existente) {
         $mac_salvo = $sessao_existente['mac_address'];
-        error_log("MAC encontrado na DB: '$mac_salvo'");
         
-        // Verificar se MAC é diferente
         if ($mac_salvo !== $mac_address) {
-            error_log("BLOQUEIO: MAC diferente - DB='$mac_salvo', Enviado='$mac_address'");
-            
-            // Log da violação
-            $stmt = $pdo->prepare("INSERT INTO access_logs (usuario_id, mac_address, ip_address, user_agent, login_successful, created_at) VALUES (?, ?, ?, ?, 0, NOW())");
-            $stmt->execute([
-                $usuario['id'], 
-                $mac_address, 
-                $_SERVER['REMOTE_ADDR'] ?? '', 
-                'VIOLACAO_MAC: ' . ($_SERVER['HTTP_USER_AGENT'] ?? '')
-            ]);
-            
             $mac_masked = substr($mac_salvo, 0, 8) . "***" . substr($mac_salvo, -5);
-            
             echo json_encode([
                 'success' => false, 
                 'message' => "ACESSO BLOQUEADO: Conta vinculada a outro computador ($mac_masked)",
@@ -130,59 +107,20 @@ try {
             exit;
         }
         
-        // MAC correto - apenas renovar token
-        error_log("MAC correto - renovando token");
         $session_token = bin2hex(random_bytes(32));
         $expires_at = date('Y-m-d H:i:s', strtotime('+24 hours'));
         
         $stmt = $pdo->prepare("UPDATE user_sessions SET session_token = ?, expires_at = ?, updated_at = NOW() WHERE usuario_id = ?");
         $stmt->execute([$session_token, $expires_at, $usuario['id']]);
         
-        error_log("Token renovado para usuario: {$usuario['login']}");
-        
     } else {
-        // NÃO TEM SESSÃO - CRIAR NOVA
-        error_log("Criando nova sessão para usuario: {$usuario['login']}");
-        
         $session_token = bin2hex(random_bytes(32));
         $expires_at = date('Y-m-d H:i:s', strtotime('+24 hours'));
         
-        // INSERIR NOVA SESSÃO COM MAC
         $stmt = $pdo->prepare("INSERT INTO user_sessions (usuario_id, mac_address, session_token, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, NOW(), NOW())");
-        $result = $stmt->execute([$usuario['id'], $mac_address, $session_token, $expires_at]);
-        
-        if ($result) {
-            error_log("SUCESSO: Nova sessão criada - MAC='$mac_address' salvo na database");
-            
-            // VERIFICAR SE REALMENTE SALVOU
-            $stmt = $pdo->prepare("SELECT mac_address FROM user_sessions WHERE usuario_id = ?");
-            $stmt->execute([$usuario['id']]);
-            $mac_verificacao = $stmt->fetchColumn();
-            
-            if ($mac_verificacao === $mac_address) {
-                error_log("CONFIRMADO: MAC foi salvo corretamente na database");
-            } else {
-                error_log("ERRO: MAC não foi salvo corretamente!");
-                echo json_encode(['success' => false, 'message' => 'Erro ao salvar sessão']);
-                exit;
-            }
-        } else {
-            error_log("ERRO: Falha ao inserir sessão na database");
-            echo json_encode(['success' => false, 'message' => 'Erro ao criar sessão']);
-            exit;
-        }
+        $stmt->execute([$usuario['id'], $mac_address, $session_token, $expires_at]);
     }
     
-    // 3. LOG DE ACESSO AUTORIZADO
-    $stmt = $pdo->prepare("INSERT INTO access_logs (usuario_id, mac_address, ip_address, user_agent, login_successful, created_at) VALUES (?, ?, ?, ?, 1, NOW())");
-    $stmt->execute([
-        $usuario['id'], 
-        $mac_address, 
-        $_SERVER['REMOTE_ADDR'] ?? '', 
-        $_SERVER['HTTP_USER_AGENT'] ?? ''
-    ]);
-    
-    // 4. RESPOSTA DE SUCESSO
     echo json_encode([
         'success' => true,
         'message' => 'Login realizado com sucesso',
@@ -193,10 +131,8 @@ try {
         'is_client' => true
     ]);
     
-    error_log("LOGIN SUCESSO: {$usuario['login']} - MAC $mac_address salvo/verificado");
-    
 } catch (Exception $e) {
-    error_log("ERRO CRÍTICO: " . $e->getMessage());
+    http_response_code(500);
     echo json_encode(['success' => false, 'message' => 'Erro interno do servidor']);
 }
 ?>
